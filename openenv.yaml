@@ -1,0 +1,245 @@
+name: supply-chain-disruption
+version: "1.0.0"
+author: OpenEnv Supply Chain Team
+license: MIT
+tags: [openenv, supply-chain, logistics, real-world, disruption-management]
+
+description: >
+  A real-world multi-echelon supply chain disruption management environment.
+  An AI agent must maintain service levels, control costs, and resolve
+  disruptions (supplier failures, port closures, demand spikes, quality recalls)
+  across a global supplier → warehouse → retailer network.
+  Dense per-step reward with partial credit. Three tasks: easy → hard.
+
+# ─────────────────────────────────────────────
+# Tasks
+# ─────────────────────────────────────────────
+tasks:
+  - id: task_1_easy
+    name: Single Supplier Failure
+    difficulty: easy
+    max_steps: 20
+    pass_threshold: 0.70
+    description: >
+      Beta Parts Co (Poland) has a factory fire — output drops 70%.
+      Agent must restore service ≥ 90% via negotiation, emergency orders,
+      or backup route activation. Small 2-supplier / 1-warehouse / 2-retailer network.
+
+  - id: task_2_medium
+    name: Port Strike and Demand Spike
+    difficulty: medium
+    max_steps: 25
+    pass_threshold: 0.60
+    description: >
+      LA port strike halts all sea freight while NYC demand spikes +50% simultaneously.
+      Agent must activate air freight routes, balance two warehouses, and stay profitable.
+      3-supplier / 2-warehouse / 3-retailer network.
+
+  - id: task_3_hard
+    name: Cascading Global Failures
+    difficulty: hard
+    max_steps: 30
+    pass_threshold: 0.45
+    description: >
+      Taiwan Chips offline for 20 days, Seoul Semiconductors quality recall (7 days),
+      Singapore hub typhoon (5 days) — all concurrent. Hard $500k budget ceiling.
+      Agent must triage scarce supply across 4 global retailers.
+      4-supplier / 3-warehouse / 4-retailer network.
+
+# ─────────────────────────────────────────────
+# Observation Space
+# ─────────────────────────────────────────────
+observation_space:
+  type: dict
+  description: Structured observation of the full supply chain network state.
+  fields:
+    step:
+      type: integer
+      description: Current simulation day (0-indexed)
+    max_steps:
+      type: integer
+      description: Total episode length in days
+    task_id:
+      type: string
+    suppliers:
+      type: array
+      description: List of supplier nodes
+      item_schema:
+        id: string
+        name: string
+        country: string
+        capacity_units_per_day: float
+        reliability_score: "float [0,1]"
+        lead_time_days: integer
+        status: "enum: operational | degraded | offline"
+        current_output_pct: "float [0,1]"
+        unit_cost_usd: float
+        specialisations: "list[string]"
+    warehouses:
+      type: array
+      description: List of warehouse / distribution hub nodes
+      item_schema:
+        id: string
+        name: string
+        location: string
+        max_capacity_units: float
+        current_stock_units: float
+        holding_cost_per_unit_per_day: float
+        inbound_nodes: "list[string] (supplier IDs)"
+        outbound_nodes: "list[string] (retailer IDs)"
+        status: "enum: operational | degraded | offline"
+    retailers:
+      type: array
+      description: List of end-customer retail nodes
+      item_schema:
+        id: string
+        name: string
+        location: string
+        daily_demand_units: float
+        demand_variance_pct: float
+        safety_stock_days: float
+        current_stock_units: float
+        service_level_target: float
+        backlog_units: float
+        revenue_per_unit_usd: float
+    transport_legs:
+      type: array
+      description: Directed transport arcs between nodes
+      item_schema:
+        id: string
+        origin_id: string
+        destination_id: string
+        mode: "enum: sea | air | rail | truck"
+        transit_days: integer
+        cost_per_unit_usd: float
+        max_units_per_shipment: float
+        reliability: "float [0,1]"
+        active: boolean
+    active_disruptions:
+      type: array
+      description: Currently active disruption events
+      item_schema:
+        id: string
+        disruption_type: "enum: port_closure | supplier_failure | transport_delay | demand_spike | weather_event | quality_recall"
+        affected_node_id: string
+        severity: "float [0,1]"
+        duration_days: integer
+        description: string
+        financial_impact_usd: float
+        started_at_step: integer
+        resolved: boolean
+    kpis:
+      type: dict
+      description: Key performance indicator snapshot
+      fields:
+        service_level: "float [0,1] — weighted avg fill rate"
+        total_cost_usd: float
+        avg_days_of_stock: float
+        disruptions_active: integer
+        disruptions_resolved: integer
+        backlog_units: float
+        revenue_usd: float
+        profit_usd: float
+    done:
+      type: boolean
+
+# ─────────────────────────────────────────────
+# Action Space
+# ─────────────────────────────────────────────
+action_space:
+  type: dict
+  description: Discrete action type with optional typed parameters.
+  fields:
+    action_type:
+      type: enum
+      required: true
+      values:
+        emergency_order:       "Instant order from supplier (40% cost premium). Params: supplier_id, destination_node_id, units"
+        reallocate_inventory:  "Transfer stock between warehouses. Params: source_node_id, destination_node_id, units"
+        expedite_transport:    "Halve transit days on a leg (3x cost + $500 fee). Params: transport_leg_id"
+        activate_backup_route: "Enable an inactive transport leg. Params: transport_leg_id or source/dest node IDs"
+        negotiate_supplier:    "70% chance to restore 50% output on DEGRADED supplier ($1000 fee). Params: supplier_id"
+        adjust_safety_stock:   "Update safety stock target at retailer. Params: destination_node_id, new_safety_stock_days"
+        reroute_shipment:      "Switch transport leg to air freight (2.5x cost + $300 fee). Params: transport_leg_id"
+        do_nothing:            "No action this step. Zero cost."
+    supplier_id:
+      type: string
+      optional: true
+    destination_node_id:
+      type: string
+      optional: true
+    source_node_id:
+      type: string
+      optional: true
+    transport_leg_id:
+      type: string
+      optional: true
+    units:
+      type: float
+      optional: true
+    new_safety_stock_days:
+      type: float
+      optional: true
+    notes:
+      type: string
+      optional: true
+
+# ─────────────────────────────────────────────
+# Reward
+# ─────────────────────────────────────────────
+reward:
+  range: [0.0, 1.0]
+  frequency: per_step
+  partial_credit: true
+  description: >
+    Dense scalar reward at every step. Multi-component weighted sub-scores
+    provide partial credit for intermediate progress. Breakdown always
+    available in StepResult.info.reward_breakdown.
+
+  task_1_weights:
+    service_level_gte_90pct: 0.40
+    profitability:           0.30
+    disruption_resolved:     0.20
+    action_efficiency:       0.10
+
+  task_2_weights:
+    service_level_gte_92pct: 0.35
+    profitability:           0.25
+    warehouse_balance:       0.20
+    disruption_speed:        0.20
+
+  task_3_weights:
+    service_level_gte_85pct: 0.30
+    budget_adherence:        0.25
+    triage_quality:          0.20
+    supply_resilience:       0.15
+    backlog_reduction:       0.10
+
+  penalties:
+    - "Repeated emergency orders reduce efficiency score (Task 1)"
+    - "Warehouse fill <5% or >85% reduces balance score (Task 2)"
+    - "Exceeding $500k budget ceiling applies exponential penalty (Task 3)"
+
+# ─────────────────────────────────────────────
+# HTTP API
+# ─────────────────────────────────────────────
+api:
+  framework: FastAPI
+  port: 7860
+  endpoints:
+    - {method: POST, path: /reset,    description: "Reset environment. Body: ResetRequest{task_id, seed}"}
+    - {method: POST, path: /step,     description: "Take a step. Body: StepRequest{action: Action}"}
+    - {method: GET,  path: /state,    description: "Get current state as Observation dict"}
+    - {method: GET,  path: /tasks,    description: "List all tasks with metadata"}
+    - {method: GET,  path: /health,   description: "Health check"}
+    - {method: POST, path: /validate, description: "OpenEnv compliance smoke-test"}
+    - {method: GET,  path: /docs,     description: "Swagger UI"}
+
+# ─────────────────────────────────────────────
+# Deployment
+# ─────────────────────────────────────────────
+deployment:
+  platform: huggingface-spaces
+  dockerfile: Dockerfile
+  port: 7860
+  sdk: docker
